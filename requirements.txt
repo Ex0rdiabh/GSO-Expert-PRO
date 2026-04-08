@@ -3,3 +3,5 @@ firebase-admin
 pymupdf
 pandas
 openpyxl
+cloudinary
+requests
