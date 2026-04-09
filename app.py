@@ -8,6 +8,8 @@ import re
 import requests
 import cloudinary
 import cloudinary.uploader
+import tempfile
+import os
 from datetime import datetime
 
 # =========================================================
@@ -172,22 +174,48 @@ def create_ccr_summary_excel(ccr_df):
 
 
 def extract_first_match(pattern, text, default=""):
-    match = re.search(pattern, text, re.IGNORECASE)
+    match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
     return match.group(1).strip() if match else default
 
 
+def normalize_pdf_text(text):
+    """Make PDF text extraction more tolerant to spacing/OCR quirks."""
+    if not text:
+        return ""
+
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\s*:\s*", ": ", text)
+    text = re.sub(r"\n+", "\n", text)
+    return text.strip()
+
+
+def extract_field_by_label(text, label, default=""):
+    pattern = rf"(?:^|\n){re.escape(label)}\s*:\s*(.+)"
+    match = re.search(pattern, text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return default
+
+
+def parse_expiry_date(text):
+    match = re.search(r"Date of Expiry\s*:\s*(\d{1,2}\s*[A-Z]{3}\s*\d{4})", text, re.IGNORECASE)
+    if match:
+        return format_date_to_string(match.group(1).strip())
+    return "000000"
+
+
 def extract_certificate_fields(text):
-    ccr_no = extract_first_match(r"CCR No:\s*(\d+)", text)
-    brand = extract_first_match(r"Brand:\s*(.*)", text).upper()
-    pattern = extract_first_match(r"Pattern:\s*(.*)", text).upper()
-    country = extract_first_match(r"Country of Production:\s*(.*)", text).upper()
-    ref_no = extract_first_match(r"Manufacturer Ref No:\s*(.*)", text).zfill(6)
-    tyre_type = extract_first_match(r"Type:\s*(.*)", text)
-    expiry_raw = extract_first_match(
-        r"Date of Expiry:\s*(\d{1,2}\s*[A-Z]{3}\s*\d{4})",
-        text
-    )
-    expiry = format_date_to_string(expiry_raw) if expiry_raw else "000000"
+    text = normalize_pdf_text(text)
+
+    ccr_no = extract_first_match(r"CCR No\s*:\s*(\d{5,})", text)
+    brand = extract_field_by_label(text, "Brand").upper()
+    pattern = extract_field_by_label(text, "Pattern").upper()
+    country = extract_field_by_label(text, "Country of Production").upper()
+    ref_no = extract_first_match(r"Manufacturer Ref No\s*:\s*([A-Z0-9-]+)", text).zfill(6)
+    tyre_type = extract_field_by_label(text, "Type")
+    expiry = parse_expiry_date(text)
+
     clean_size = tyre_type.replace("/", "-").strip().upper()
 
     return {
@@ -214,171 +242,25 @@ def build_doc_id(fields):
     return f"{brand}_{size}_{pattern}_{expiry}"
 
 
-def clean_ccr_list(ccr_text):
-    return [v.strip() for v in str(ccr_text).split(",") if v.strip()]
-
-
-def get_import_decl_default_rect(page):
-    """
-    Tuned for the uploaded scanned declaration template.
-    This rectangle targets the middle box for:
-    'Conformity Certificate/s No:'.
-    """
-    return fitz.Rect(775, 1045, 1325, 1170)
-
-
-def get_import_decl_safe_zones(page, allow_row_overflow=False):
-    """
-    Safe writable areas for the CCR row.
-
-    Normal mode:
-        - middle box only
-    Large-batch overflow mode:
-        - middle box first
-        - then the blank area of the right box, without covering the Arabic label
-        - then the blank area of the left box, without covering the English label
-    """
-    middle = fitz.Rect(775, 1045, 1325, 1170)
-
-    if not allow_row_overflow:
-        return [middle]
-
-    # Tuned for the uploaded declaration scan rendered in the app.
-    # Right blank area: keep clear of the Arabic title on the top-right.
-    right_blank = fitz.Rect(1335, 1045, 1710, 1170)
-
-    # Left blank area: start after the English label text so we do not cover it.
-    left_blank = fitz.Rect(505, 1045, 760, 1170)
-
-    return [middle, right_blank, left_blank]
-
-
-def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
-    """
-    Choose a font size and column count per safe zone so all CCRs fit.
-    For large batches, allows overflow across the same row while avoiding label text.
-    """
-    count = len(ccr_values)
-    if count <= 0:
-        return {
-            "font_size": 12,
-            "line_height": 14,
-            "zones": []
-        }
-
-    if requested_fontsize is not None and float(requested_fontsize) > 0:
-        font_candidates = [float(requested_fontsize)]
-    else:
-        # Search from larger to smaller fonts until the total capacity fits the CCR count.
-        font_candidates = [x / 10 for x in range(28 * 10, 7 * 10 - 1, -2)]
-
-    best = None
-
-    for font_size in font_candidates:
-        line_height = max(font_size * 1.12, font_size + 2)
-        zone_layouts = []
-        total_capacity = 0
-
-        for zi, zone in enumerate(zones):
-            inner = fitz.Rect(zone.x0 + 8, zone.y0 + 8, zone.x1 - 8, zone.y1 - 8)
-            rows = max(1, int(inner.height // line_height))
-
-            # Slightly denser packing in the central zone.
-            char_factor = 4.05 if zi == 0 else 4.15
-            col_width_needed = font_size * char_factor
-            cols = max(1, int(inner.width // col_width_needed))
-
-            capacity = rows * cols
-            total_capacity += capacity
-            zone_layouts.append({
-                'rect': inner,
-                'rows': rows,
-                'cols': cols,
-                'capacity': capacity,
-            })
-
-        best = {
-            'font_size': font_size,
-            'line_height': line_height,
-            'zones': zone_layouts,
-            'total_capacity': total_capacity,
-        }
-
-        if total_capacity >= count:
-            return best
-
-    return best
-
-
-def draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=None):
-    """
-    Draw CCRs from the top-left of the middle box first.
-    For large batches, continue into adjacent safe areas on the same row,
-    while staying inside those areas and not covering the labels.
-    """
-    layout = choose_multi_zone_layout(ccr_values, zones, requested_fontsize=fontsize)
-    font_size = layout['font_size']
-    line_height = layout['line_height']
-
-    remaining = list(ccr_values)
-
-    # White only the writable zones, not the labels.
-    for zone_info in layout['zones']:
-        page.draw_rect(zone_info['rect'], color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
-
-    for zone_info in layout['zones']:
-        if not remaining:
-            break
-
-        rect = zone_info['rect']
-        rows = zone_info['rows']
-        cols = zone_info['cols']
-        col_width = rect.width / cols
-        start_x = rect.x0 + 2
-        start_y = rect.y0 + font_size
-
-        for idx_in_zone in range(min(zone_info['capacity'], len(remaining))):
-            ccr = remaining.pop(0)
-            row = idx_in_zone // cols
-            col = idx_in_zone % cols
-            x = start_x + (col * col_width)
-            y = start_y + (row * line_height)
-
-            if y > rect.y1 - 1:
-                break
-
-            page.insert_text(
-                fitz.Point(x, y),
-                ccr,
-                fontsize=font_size,
-                fontname='cour',
-                color=(0, 0, 0),
-                overlay=True,
-            )
+def insert_wrapped_text(page, text, rect, fontsize=10, align=0):
+    page.insert_textbox(
+        rect,
+        text,
+        fontsize=fontsize,
+        fontname="helv",
+        color=(0, 0, 0),
+        align=align
+    )
 
 
 def fill_import_declaration_pdf(template_bytes, ccr_text,
-                                x0=None, y0=None, x1=None, y1=None,
-                                fontsize=None, allow_row_overflow=True):
-    doc = fitz.open(stream=template_bytes, filetype='pdf')
+                                x0=155, y0=272, x1=505, y1=322,
+                                fontsize=11):
+    doc = fitz.open(stream=template_bytes, filetype="pdf")
     page = doc[0]
 
-    auto_rect = get_import_decl_default_rect(page)
-
-    if None in (x0, y0, x1, y1):
-        primary_rect = auto_rect
-    else:
-        primary_rect = fitz.Rect(x0, y0, x1, y1)
-
-    ccr_values = [c.strip() for c in str(ccr_text).split(',') if c.strip()]
-
-    if allow_row_overflow and len(ccr_values) > 18 and None in (x0, y0, x1, y1):
-        zones = get_import_decl_safe_zones(page, allow_row_overflow=True)
-    else:
-        zones = [primary_rect]
-
-    if ccr_values:
-        draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=fontsize)
+    rect = fitz.Rect(x0, y0, x1, y1)
+    insert_wrapped_text(page, ccr_text, rect, fontsize=fontsize, align=0)
 
     out = io.BytesIO()
     doc.save(out)
@@ -386,38 +268,54 @@ def fill_import_declaration_pdf(template_bytes, ccr_text,
     return out.getvalue()
 
 
+def upload_pdf_to_cloudinary(pdf_bytes, doc_id):
+    """Upload through a temp file for better Cloudinary raw-PDF reliability."""
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            tmp.flush()
+            tmp_path = tmp.name
 
-def render_pdf_first_page_to_png_bytes(pdf_bytes, zoom=1.35):
-    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
-    page = doc[0]
-    matrix = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=matrix, alpha=False)
-    return pix.tobytes('png')
+        upload_result = cloudinary.uploader.upload(
+            tmp_path,
+            resource_type="raw",
+            folder="certificates",
+            public_id=doc_id,
+            format="pdf",
+            overwrite=True,
+            invalidate=True,
+            unique_filename=False,
+            use_filename=False,
+        )
 
-
-def build_preview_ccr_values(count):
-    base = 551520
-    return [str(base + i).zfill(6) for i in range(max(0, int(count)))]
-
-
-def generate_import_decl_preview(template_bytes, count=20, fontsize=None, allow_row_overflow=True,
-                                 x0=None, y0=None, x1=None, y1=None):
-    ccr_values = build_preview_ccr_values(count)
-    ccr_text = ', '.join(ccr_values)
-    filled_pdf = fill_import_declaration_pdf(
-        template_bytes=template_bytes,
-        ccr_text=ccr_text,
-        x0=x0, y0=y0, x1=x1, y1=y1,
-        fontsize=fontsize,
-        allow_row_overflow=allow_row_overflow,
-    )
-    return filled_pdf, render_pdf_first_page_to_png_bytes(filled_pdf)
+        secure_url = upload_result.get("secure_url") or upload_result.get("url")
+        if not secure_url:
+            raise ValueError("Cloudinary did not return a valid file URL")
+        return secure_url
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def download_pdf_from_url(pdf_url):
-    response = requests.get(pdf_url, timeout=30)
-    response.raise_for_status()
-    return response.content
+    last_error = None
+    candidate_urls = [pdf_url]
+
+    if "/image/upload/" in pdf_url:
+        candidate_urls.append(pdf_url.replace("/image/upload/", "/raw/upload/"))
+    if "/video/upload/" in pdf_url:
+        candidate_urls.append(pdf_url.replace("/video/upload/", "/raw/upload/"))
+
+    for url in list(dict.fromkeys(candidate_urls)):
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            last_error = e
+
+    raise last_error if last_error else ValueError("Unable to download PDF from Cloudinary URL")
 
 # -----------------------------
 # DATABASE LOADER
@@ -533,19 +431,27 @@ elif menu == "Add Certificates":
 
             processed_any_page = False
 
-            for page_num in range(0, len(doc), 2):
+            for page_num in range(len(doc)):
                 try:
                     text = doc[page_num].get_text()
+                    normalized_text = normalize_pdf_text(text)
 
-                    if "GSO Conformity Certificate" not in text:
+                    if "GSO Conformity Certificate" not in normalized_text:
                         continue
 
-                    fields = extract_certificate_fields(text)
+                    fields = extract_certificate_fields(normalized_text)
+
+                    if not fields["ccr_no"]:
+                        upload_log.append({
+                            "file": uploaded_file.name,
+                            "status": f"Skipped page {page_num + 1}: CCR No not detected"
+                        })
+                        continue
 
                     if not fields["ref_no"] or not fields["country"]:
                         upload_log.append({
                             "file": uploaded_file.name,
-                            "status": f"Skipped page {page_num + 1}: missing Ref No or Country"
+                            "status": f"Skipped page {page_num + 1}: missing Ref No or Country | extracted={fields}"
                         })
                         continue
 
@@ -559,7 +465,11 @@ elif menu == "Add Certificates":
                     doc_id = build_doc_id(fields)
 
                     new_doc = fitz.open()
-                    end_page = min(page_num + 1, len(doc) - 1)
+                    end_page = page_num
+                    if page_num + 1 < len(doc):
+                        next_text = normalize_pdf_text(doc[page_num + 1].get_text())
+                        if "Passenger Car Tyres Test Report" in next_text and f"CCR No: {fields['ccr_no']}" in next_text:
+                            end_page = page_num + 1
                     new_doc.insert_pdf(doc, from_page=page_num, to_page=end_page)
 
                     pdf_url = upload_pdf_to_cloudinary(new_doc.tobytes(), doc_id)
