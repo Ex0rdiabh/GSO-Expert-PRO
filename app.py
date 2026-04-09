@@ -413,6 +413,12 @@ def generate_import_decl_preview(template_bytes, count=20, fontsize=None, allow_
     )
     return filled_pdf, render_pdf_first_page_to_png_bytes(filled_pdf)
 
+
+def download_pdf_from_url(pdf_url):
+    response = requests.get(pdf_url, timeout=30)
+    response.raise_for_status()
+    return response.content
+
 # -----------------------------
 # DATABASE LOADER
 # -----------------------------
@@ -624,6 +630,59 @@ elif menu == "Search & Merge":
             decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
         else:
             decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
+
+    if import_decl_file is not None:
+        st.markdown("### 👁️ Live Preview")
+        preview_mode = st.radio(
+            "Preview source",
+            ["Sample CCR count", "Custom CCR list"],
+            horizontal=True,
+            key="preview_mode"
+        )
+        allow_row_overflow = st.checkbox(
+            "Allow row overflow for large batches",
+            value=True,
+            help="For large CCR counts, continue across the same safe row without covering label text.",
+            key="allow_row_overflow_preview"
+        )
+
+        if preview_mode == "Sample CCR count":
+            preview_count = st.slider("Preview CCR count", min_value=1, max_value=40, value=20, key="preview_count")
+            preview_ccrs = build_preview_ccr_values(preview_count)
+        else:
+            custom_ccrs_text = st.text_area(
+                "Custom CCRs (comma or line separated)",
+                value="551520, 561750, 568580, 570876",
+                key="custom_ccrs_text"
+            )
+            preview_ccrs = [c.strip() for c in re.split(r"[
+,]+", custom_ccrs_text) if c.strip()]
+            preview_count = len(preview_ccrs)
+
+        st.caption(f"Previewing {preview_count} CCR(s)")
+
+        if st.button("Generate Live Preview", key="generate_live_preview"):
+            try:
+                template_bytes = import_decl_file.getvalue()
+                preview_fontsize = None if decl_fontsize in (None, 0) else decl_fontsize
+                preview_pdf = fill_import_declaration_pdf(
+                    template_bytes=template_bytes,
+                    ccr_text=", ".join(preview_ccrs),
+                    x0=decl_x0, y0=decl_y0, x1=decl_x1, y1=decl_y1,
+                    fontsize=preview_fontsize,
+                    allow_row_overflow=allow_row_overflow,
+                )
+                preview_png = render_pdf_first_page_to_png_bytes(preview_pdf)
+                st.image(preview_png, caption="Live preview of the filled Import Declaration", use_container_width=True)
+                st.download_button(
+                    "Download Preview PDF",
+                    data=preview_pdf,
+                    file_name="Import_Declaration_Preview.pdf",
+                    mime="application/pdf",
+                    key="download_preview_pdf"
+                )
+            except Exception as e:
+                st.error(f"Could not generate live preview: {e}")
 
     if excel_file and st.button("Generate Report"):
         with st.spinner("Loading Database Index..."):
