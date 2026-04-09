@@ -242,31 +242,145 @@ def build_doc_id(fields):
     return f"{brand}_{size}_{pattern}_{expiry}"
 
 
-def insert_wrapped_text(page, text, rect, fontsize=10, align=0):
-    page.insert_textbox(
-        rect,
-        text,
-        fontsize=fontsize,
-        fontname="helv",
-        color=(0, 0, 0),
-        align=align
-    )
+def get_import_decl_default_rect(page):
+    """
+    Tuned for the uploaded scanned declaration template.
+    This rectangle targets the middle box for:
+    'Conformity Certificate/s No:'.
+    """
+    return fitz.Rect(775, 1045, 1325, 1170)
+
+
+def get_import_decl_safe_zones(page, allow_row_overflow=False):
+    """
+    Safe writable areas for the CCR row.
+
+    Normal mode:
+        - middle box only
+    Large-batch overflow mode:
+        - middle box first
+        - then the blank area of the right box, without covering the Arabic label
+        - then the blank area of the left box, without covering the English label
+    """
+    middle = fitz.Rect(775, 1045, 1325, 1170)
+
+    if not allow_row_overflow:
+        return [middle]
+
+    right_blank = fitz.Rect(1335, 1045, 1710, 1170)
+    left_blank = fitz.Rect(505, 1045, 760, 1170)
+    return [middle, right_blank, left_blank]
+
+
+def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
+    count = len(ccr_values)
+    if count <= 0:
+        return {"font_size": 12, "line_height": 14, "zones": []}
+
+    if requested_fontsize is not None and float(requested_fontsize) > 0:
+        font_candidates = [float(requested_fontsize)]
+    else:
+        font_candidates = [x / 10 for x in range(280, 69, -2)]
+
+    best = None
+    for font_size in font_candidates:
+        line_height = max(font_size * 1.12, font_size + 2)
+        zone_layouts = []
+        total_capacity = 0
+
+        for zi, zone in enumerate(zones):
+            inner = fitz.Rect(zone.x0 + 8, zone.y0 + 8, zone.x1 - 8, zone.y1 - 8)
+            rows = max(1, int(inner.height // line_height))
+            char_factor = 4.05 if zi == 0 else 4.15
+            col_width_needed = font_size * char_factor
+            cols = max(1, int(inner.width // col_width_needed))
+            capacity = rows * cols
+            total_capacity += capacity
+            zone_layouts.append({
+                "rect": inner,
+                "rows": rows,
+                "cols": cols,
+                "capacity": capacity,
+            })
+
+        best = {
+            "font_size": font_size,
+            "line_height": line_height,
+            "zones": zone_layouts,
+            "total_capacity": total_capacity,
+        }
+        if total_capacity >= count:
+            return best
+
+    return best
+
+
+def draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=None):
+    layout = choose_multi_zone_layout(ccr_values, zones, requested_fontsize=fontsize)
+    font_size = layout["font_size"]
+    line_height = layout["line_height"]
+    remaining = list(ccr_values)
+
+    for zone_info in layout["zones"]:
+        page.draw_rect(zone_info["rect"], color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+
+    for zone_info in layout["zones"]:
+        if not remaining:
+            break
+
+        rect = zone_info["rect"]
+        rows = zone_info["rows"]
+        cols = zone_info["cols"]
+        col_width = rect.width / cols
+        start_x = rect.x0 + 2
+        start_y = rect.y0 + font_size
+
+        for idx_in_zone in range(min(zone_info["capacity"], len(remaining))):
+            ccr = remaining.pop(0)
+            row = idx_in_zone // cols
+            col = idx_in_zone % cols
+            x = start_x + (col * col_width)
+            y = start_y + (row * line_height)
+
+            if y > rect.y1 - 1:
+                break
+
+            page.insert_text(
+                fitz.Point(x, y),
+                ccr,
+                fontsize=font_size,
+                fontname="cour",
+                color=(0, 0, 0),
+                overlay=True,
+            )
 
 
 def fill_import_declaration_pdf(template_bytes, ccr_text,
-                                x0=155, y0=272, x1=505, y1=322,
-                                fontsize=11):
+                                x0=None, y0=None, x1=None, y1=None,
+                                fontsize=None, allow_row_overflow=True):
     doc = fitz.open(stream=template_bytes, filetype="pdf")
     page = doc[0]
 
-    rect = fitz.Rect(x0, y0, x1, y1)
-    insert_wrapped_text(page, ccr_text, rect, fontsize=fontsize, align=0)
+    auto_rect = get_import_decl_default_rect(page)
+    if None in (x0, y0, x1, y1):
+        primary_rect = auto_rect
+    else:
+        primary_rect = fitz.Rect(x0, y0, x1, y1)
+
+    ccr_values = [c.strip() for c in str(ccr_text).replace("\n", ",").split(",") if c.strip()]
+
+    if allow_row_overflow and len(ccr_values) > 18 and None in (x0, y0, x1, y1):
+        zones = get_import_decl_safe_zones(page, allow_row_overflow=True)
+    else:
+        zones = [primary_rect]
+
+    if ccr_values:
+        draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=fontsize)
 
     out = io.BytesIO()
     doc.save(out)
     out.seek(0)
     return out.getvalue()
-
 
 
 def render_pdf_first_page_to_png_bytes(pdf_bytes, zoom=1.35):
@@ -730,18 +844,32 @@ elif menu == "Search & Merge":
             )
 
             if import_decl_file is not None:
-                ccr_list = [str(item["CCR No"]).strip() for item in found_ccrs if str(item["CCR No"]).strip()]
-                ccr_text = ", ".join(ccr_list)
+                st.markdown("### ✍️ Final CCR List for Declaration")
+                auto_ccr_list = [str(item["CCR No"]).strip() for item in found_ccrs if str(item["CCR No"]).strip()]
+                auto_ccr_text = ", ".join(auto_ccr_list)
+                st.caption("This list is auto-generated from the Excel matches below. You can edit it before exporting the declaration.")
 
-                if ccr_text:
+                editable_ccr_text = st.text_area(
+                    "Edit CCRs for final declaration (comma or line separated)",
+                    value=auto_ccr_text,
+                    height=120,
+                    key="final_decl_ccr_editor"
+                )
+
+                final_ccr_list = [c.strip() for c in re.split(r"[,\n]+", editable_ccr_text) if c.strip()]
+                final_ccr_text = ", ".join(final_ccr_list)
+
+                if final_ccr_text:
+                    st.info(f"Final declaration will use {len(final_ccr_list)} CCR(s): {final_ccr_text}")
                     try:
                         filled_pdf = fill_import_declaration_pdf(
-                            template_bytes=import_decl_file.read(),
-                            ccr_text=ccr_text,
+                            template_bytes=import_decl_file.getvalue(),
+                            ccr_text=final_ccr_text,
                             x0=decl_x0, y0=decl_y0, x1=decl_x1, y1=decl_y1,
-                            fontsize=(None if decl_fontsize == 0 else decl_fontsize)
+                            fontsize=(None if decl_fontsize in (None, 0) else decl_fontsize),
+                            allow_row_overflow=True,
                         )
-                        st.success(f"Import Declaration filled with CCR text: {ccr_text}")
+                        st.success("Import Declaration is ready using the edited CCR list.")
 
                         st.download_button(
                             "Download Filled Import Declaration",
@@ -752,7 +880,7 @@ elif menu == "Search & Merge":
                     except Exception as e:
                         st.error(f"Could not generate filled Import Declaration PDF: {e}")
                 else:
-                    st.warning("No CCR numbers were found to place into the Import Declaration PDF.")
+                    st.warning("No CCR numbers are currently entered for the declaration.")
 
         if missing:
             with st.expander("Errors / Missing"):
