@@ -268,6 +268,21 @@ def fill_import_declaration_pdf(template_bytes, ccr_text,
     return out.getvalue()
 
 
+
+def render_pdf_first_page_to_png_bytes(pdf_bytes, zoom=1.35):
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    page = doc[0]
+    matrix = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=matrix, alpha=False)
+    return pix.tobytes('png')
+
+
+
+def build_preview_ccr_values(count):
+    base = 551520
+    return [str(base + i).zfill(6) for i in range(max(0, int(count)))]
+
+
 def upload_pdf_to_cloudinary(pdf_bytes, doc_id):
     """Upload through a temp file for better Cloudinary raw-PDF reliability."""
     tmp_path = None
