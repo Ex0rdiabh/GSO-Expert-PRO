@@ -227,24 +227,24 @@ def insert_wrapped_text(page, text, rect, fontsize=10, align=0):
     )
 
 
+def format_ccr_text_for_box(ccr_text, per_line=2):
+    values = [v.strip() for v in str(ccr_text).split(",") if v.strip()]
+    if not values:
+        return ""
+    lines = []
+    for i in range(0, len(values), per_line):
+        chunk = values[i:i + per_line]
+        lines.append("    ".join(chunk))
+    return "\n".join(lines)
+
+
 def get_import_decl_default_rect(page):
     """
-    The original defaults (155, 272, 505, 322) only make sense on a normal
-    A4-style PDF coordinate space (~595 x 842 points). The uploaded template is
-    a high-resolution scanned PDF (~1960 x 2918), so we scale the rectangle.
+    Tuned for the uploaded scanned declaration template.
+    This rectangle targets only the middle box for:
+    'Conformity Certificate/s No:'.
     """
-    base_w, base_h = 595.0, 842.0
-    default_rect = fitz.Rect(155, 272, 505, 322)
-
-    scale_x = page.rect.width / base_w
-    scale_y = page.rect.height / base_h
-
-    return fitz.Rect(
-        default_rect.x0 * scale_x,
-        default_rect.y0 * scale_y,
-        default_rect.x1 * scale_x,
-        default_rect.y1 * scale_y,
-    )
+    return fitz.Rect(775, 1045, 1325, 1170)
 
 
 def fill_import_declaration_pdf(template_bytes, ccr_text,
@@ -260,21 +260,23 @@ def fill_import_declaration_pdf(template_bytes, ccr_text,
     else:
         rect = fitz.Rect(x0, y0, x1, y1)
 
+    formatted_text = format_ccr_text_for_box(ccr_text, per_line=2)
+
     if fontsize is None:
-        fontsize = max(11, round(11 * (page.rect.width / 595.0)))
+        fontsize = 28
 
-    # White out the target area first so the new CCR text is cleaner on the scan.
-    page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+    # Add a small inner margin so the text stays comfortably inside the box.
+    inner_rect = fitz.Rect(rect.x0 + 18, rect.y0 + 18, rect.x1 - 18, rect.y1 - 18)
 
-    fit_result = insert_wrapped_text(page, ccr_text, rect, fontsize=fontsize, align=0)
+    # White out only the inside of the target cell.
+    page.draw_rect(inner_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+
+    fit_result = insert_wrapped_text(page, formatted_text, inner_rect, fontsize=fontsize, align=1)
 
     if fit_result < 0:
-        # Retry with smaller font if the text does not fit.
-        for retry_size in [fontsize - 2, fontsize - 4, fontsize - 6]:
-            if retry_size < 10:
-                break
-            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
-            fit_result = insert_wrapped_text(page, ccr_text, rect, fontsize=retry_size, align=0)
+        for retry_size in [26, 24, 22, 20, 18]:
+            page.draw_rect(inner_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+            fit_result = insert_wrapped_text(page, formatted_text, inner_rect, fontsize=retry_size, align=1)
             if fit_result >= 0:
                 break
 
@@ -506,10 +508,10 @@ elif menu == "Search & Merge":
         use_manual_decl_coords = st.checkbox("Use manual coordinates", value=False)
         if use_manual_decl_coords:
             st.warning("Manual values must match the actual PDF page size. For scanned PDFs, small values like 155 / 272 usually place the text in the wrong area.")
-            decl_x0 = st.number_input("x0", value=760)
-            decl_y0 = st.number_input("y0", value=1000)
-            decl_x1 = st.number_input("x1", value=1335)
-            decl_y1 = st.number_input("y1", value=1310)
+            decl_x0 = st.number_input("x0", value=775)
+            decl_y0 = st.number_input("y0", value=1045)
+            decl_x1 = st.number_input("x1", value=1325)
+            decl_y1 = st.number_input("y1", value=1170)
             decl_fontsize = st.number_input("Font Size", value=28)
         else:
             decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
