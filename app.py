@@ -221,104 +221,164 @@ def clean_ccr_list(ccr_text):
 def get_import_decl_default_rect(page):
     """
     Tuned for the uploaded scanned declaration template.
-    This rectangle targets only the middle box for:
+    This rectangle targets the middle box for:
     'Conformity Certificate/s No:'.
     """
     return fitz.Rect(775, 1045, 1325, 1170)
 
 
-def choose_ccr_layout(ccr_values, box_rect, requested_fontsize=None):
+def get_import_decl_safe_zones(page, allow_row_overflow=False):
+    """
+    Safe writable areas for the CCR row.
+
+    Normal mode:
+        - middle box only
+    Large-batch overflow mode:
+        - middle box first
+        - then the blank area of the right box, without covering the Arabic label
+        - then the blank area of the left box, without covering the English label
+    """
+    middle = fitz.Rect(775, 1045, 1325, 1170)
+
+    if not allow_row_overflow:
+        return [middle]
+
+    # Tuned for the uploaded declaration scan rendered in the app.
+    # Right blank area: keep clear of the Arabic title on the top-right.
+    right_blank = fitz.Rect(1335, 1045, 1710, 1170)
+
+    # Left blank area: start after the English label text so we do not cover it.
+    left_blank = fitz.Rect(505, 1045, 760, 1170)
+
+    return [middle, right_blank, left_blank]
+
+
+def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
+    """
+    Choose a font size and column count per safe zone so all CCRs fit.
+    For large batches, allows overflow across the same row while avoiding label text.
+    """
     count = len(ccr_values)
-    box_width = box_rect.width
-    box_height = box_rect.height
+    if count <= 0:
+        return {
+            "font_size": 12,
+            "line_height": 14,
+            "zones": []
+        }
 
-    if count <= 4:
-        preferred_columns = 2
-    elif count <= 9:
-        preferred_columns = 3
+    if requested_fontsize is not None and float(requested_fontsize) > 0:
+        font_candidates = [float(requested_fontsize)]
     else:
-        preferred_columns = 4
+        # Search from larger to smaller fonts until the total capacity fits the CCR count.
+        font_candidates = [x / 10 for x in range(28 * 10, 7 * 10 - 1, -2)]
 
-    max_columns = min(preferred_columns, max(1, count))
+    best = None
 
-    for columns in range(max_columns, 0, -1):
-        rows = (count + columns - 1) // columns
-        col_width = box_width / columns
+    for font_size in font_candidates:
+        line_height = max(font_size * 1.12, font_size + 2)
+        zone_layouts = []
+        total_capacity = 0
 
-        if requested_fontsize is not None:
-            font_size = float(requested_fontsize)
-        else:
-            width_based = col_width / 6.8
-            height_based = box_height / (rows * 1.9)
-            font_size = min(width_based, height_based, 30)
-            font_size = max(font_size, 14)
+        for zi, zone in enumerate(zones):
+            inner = fitz.Rect(zone.x0 + 8, zone.y0 + 8, zone.x1 - 8, zone.y1 - 8)
+            rows = max(1, int(inner.height // line_height))
 
-        line_height = font_size * 1.35
-        needed_height = rows * line_height
+            # Slightly denser packing in the central zone.
+            char_factor = 4.05 if zi == 0 else 4.15
+            col_width_needed = font_size * char_factor
+            cols = max(1, int(inner.width // col_width_needed))
 
-        if needed_height <= box_height:
-            return {
-                "columns": columns,
-                "rows": rows,
-                "font_size": font_size,
-                "line_height": line_height,
-            }
+            capacity = rows * cols
+            total_capacity += capacity
+            zone_layouts.append({
+                'rect': inner,
+                'rows': rows,
+                'cols': cols,
+                'capacity': capacity,
+            })
 
-    rows = count
-    font_size = float(requested_fontsize) if requested_fontsize is not None else max(min(box_height / (rows * 1.5), 18), 10)
-    return {
-        "columns": 1,
-        "rows": rows,
-        "font_size": font_size,
-        "line_height": font_size * 1.3,
-    }
+        best = {
+            'font_size': font_size,
+            'line_height': line_height,
+            'zones': zone_layouts,
+            'total_capacity': total_capacity,
+        }
+
+        if total_capacity >= count:
+            return best
+
+    return best
 
 
-def draw_ccrs_from_top_left(page, ccr_values, rect, fontsize=None):
-    inner_rect = fitz.Rect(rect.x0 + 18, rect.y0 + 14, rect.x1 - 18, rect.y1 - 14)
+def draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=None):
+    """
+    Draw CCRs from the top-left of the middle box first.
+    For large batches, continue into adjacent safe areas on the same row,
+    while staying inside those areas and not covering the labels.
+    """
+    layout = choose_multi_zone_layout(ccr_values, zones, requested_fontsize=fontsize)
+    font_size = layout['font_size']
+    line_height = layout['line_height']
 
-    # White out only the inside of the target cell.
-    page.draw_rect(inner_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+    remaining = list(ccr_values)
 
-    layout = choose_ccr_layout(ccr_values, inner_rect, requested_fontsize=fontsize)
-    columns = layout["columns"]
-    font_size = layout["font_size"]
-    line_height = layout["line_height"]
-    col_width = inner_rect.width / columns
+    # White only the writable zones, not the labels.
+    for zone_info in layout['zones']:
+        page.draw_rect(zone_info['rect'], color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
 
-    start_y = inner_rect.y0 + font_size
+    for zone_info in layout['zones']:
+        if not remaining:
+            break
 
-    for idx, ccr in enumerate(ccr_values):
-        row = idx // columns
-        col = idx % columns
-        x = inner_rect.x0 + (col * col_width)
-        y = start_y + (row * line_height)
-        page.insert_text(
-            fitz.Point(x, y),
-            ccr,
-            fontsize=font_size,
-            fontname="cour",
-            color=(0, 0, 0),
-            overlay=True,
-        )
+        rect = zone_info['rect']
+        rows = zone_info['rows']
+        cols = zone_info['cols']
+        col_width = rect.width / cols
+        start_x = rect.x0 + 2
+        start_y = rect.y0 + font_size
+
+        for idx_in_zone in range(min(zone_info['capacity'], len(remaining))):
+            ccr = remaining.pop(0)
+            row = idx_in_zone // cols
+            col = idx_in_zone % cols
+            x = start_x + (col * col_width)
+            y = start_y + (row * line_height)
+
+            if y > rect.y1 - 1:
+                break
+
+            page.insert_text(
+                fitz.Point(x, y),
+                ccr,
+                fontsize=font_size,
+                fontname='cour',
+                color=(0, 0, 0),
+                overlay=True,
+            )
 
 
 def fill_import_declaration_pdf(template_bytes, ccr_text,
                                 x0=None, y0=None, x1=None, y1=None,
-                                fontsize=None):
-    doc = fitz.open(stream=template_bytes, filetype="pdf")
+                                fontsize=None, allow_row_overflow=True):
+    doc = fitz.open(stream=template_bytes, filetype='pdf')
     page = doc[0]
 
     auto_rect = get_import_decl_default_rect(page)
 
     if None in (x0, y0, x1, y1):
-        rect = auto_rect
+        primary_rect = auto_rect
     else:
-        rect = fitz.Rect(x0, y0, x1, y1)
+        primary_rect = fitz.Rect(x0, y0, x1, y1)
 
-    ccr_values = clean_ccr_list(ccr_text)
+    ccr_values = [c.strip() for c in str(ccr_text).split(',') if c.strip()]
+
+    if allow_row_overflow and len(ccr_values) > 18 and None in (x0, y0, x1, y1):
+        zones = get_import_decl_safe_zones(page, allow_row_overflow=True)
+    else:
+        zones = [primary_rect]
+
     if ccr_values:
-        draw_ccrs_from_top_left(page, ccr_values, rect, fontsize=fontsize)
+        draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=fontsize)
 
     out = io.BytesIO()
     doc.save(out)
@@ -326,23 +386,32 @@ def fill_import_declaration_pdf(template_bytes, ccr_text,
     return out.getvalue()
 
 
-def upload_pdf_to_cloudinary(pdf_bytes, doc_id):
-    upload_result = cloudinary.uploader.upload(
-        pdf_bytes,
-        resource_type="raw",
-        folder="certificates",
-        public_id=doc_id,
-        format="pdf",
-        overwrite=True
+
+def render_pdf_first_page_to_png_bytes(pdf_bytes, zoom=1.35):
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    page = doc[0]
+    matrix = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=matrix, alpha=False)
+    return pix.tobytes('png')
+
+
+def build_preview_ccr_values(count):
+    base = 551520
+    return [str(base + i).zfill(6) for i in range(max(0, int(count)))]
+
+
+def generate_import_decl_preview(template_bytes, count=20, fontsize=None, allow_row_overflow=True,
+                                 x0=None, y0=None, x1=None, y1=None):
+    ccr_values = build_preview_ccr_values(count)
+    ccr_text = ', '.join(ccr_values)
+    filled_pdf = fill_import_declaration_pdf(
+        template_bytes=template_bytes,
+        ccr_text=ccr_text,
+        x0=x0, y0=y0, x1=x1, y1=y1,
+        fontsize=fontsize,
+        allow_row_overflow=allow_row_overflow,
     )
-    return upload_result["secure_url"]
-
-
-def download_pdf_from_url(pdf_url):
-    response = requests.get(pdf_url, timeout=30)
-    response.raise_for_status()
-    return response.content
-
+    return filled_pdf, render_pdf_first_page_to_png_bytes(filled_pdf)
 
 # -----------------------------
 # DATABASE LOADER
