@@ -229,17 +229,23 @@ def extract_certificate_fields(text):
     }
 
 
-def build_doc_id(fields):
-    brand = fields["brand"]
-    ref_no = fields["ref_no"]
-    country = fields["country"]
-    expiry = fields["expiry"]
-    size = fields["size"]
-    pattern = fields["pattern"]
+def sanitize_doc_part(value):
+    value = str(value or "").strip().upper()
+    value = re.sub(r"[^A-Z0-9]+", "_", value)
+    return value.strip("_")
 
-    if brand in ["MICHELIN", "BFGOODRICH"]:
-        return f"{brand}_{ref_no}_{country}_{expiry}"
-    return f"{brand}_{size}_{pattern}_{expiry}"
+
+def build_doc_id(fields):
+    """
+    Naming rule for uploaded certificate PDFs:
+    BRAND_MANUFACTURERREFNO_COUNTRY_EXPIRY(DDMMYY)
+    Example: MICHELIN_922041_FRANCE_240526
+    """
+    brand = sanitize_doc_part(fields.get("brand", ""))
+    ref_no = sanitize_doc_part(fields.get("ref_no", ""))
+    country = sanitize_doc_part(fields.get("country", ""))
+    expiry = sanitize_doc_part(fields.get("expiry", ""))
+    return f"{brand}_{ref_no}_{country}_{expiry}"
 
 
 def get_import_decl_default_rect(page):
@@ -560,77 +566,81 @@ elif menu == "Add Certificates":
 
             processed_any_page = False
 
-            for page_num in range(len(doc)):
-                try:
-                    text = doc[page_num].get_text()
-                    normalized_text = normalize_pdf_text(text)
+            if len(doc) == 0:
+                upload_log.append({
+                    "file": uploaded_file.name,
+                    "status": "Skipped: empty PDF"
+                })
+                progress_bar.progress((i + 1) / len(uploaded_pdfs))
+                continue
 
-                    if "GSO Conformity Certificate" not in normalized_text:
-                        continue
+            page_num = 0
+            try:
+                text = doc[0].get_text()
+                normalized_text = normalize_pdf_text(text)
 
+                if "GSO Conformity Certificate" not in normalized_text:
+                    upload_log.append({
+                        "file": uploaded_file.name,
+                        "status": "Skipped page 1: first page is not a GSO Conformity Certificate"
+                    })
+                else:
                     fields = extract_certificate_fields(normalized_text)
 
                     if not fields["ccr_no"]:
                         upload_log.append({
                             "file": uploaded_file.name,
-                            "status": f"Skipped page {page_num + 1}: CCR No not detected"
+                            "status": "Skipped page 1: CCR No not detected"
                         })
-                        continue
-
-                    if not fields["ref_no"] or not fields["country"]:
+                    elif not fields["brand"] or not fields["ref_no"] or not fields["country"]:
                         upload_log.append({
                             "file": uploaded_file.name,
-                            "status": f"Skipped page {page_num + 1}: missing Ref No or Country | extracted={fields}"
+                            "status": f"Skipped page 1: missing Brand, Ref No, or Country | extracted={fields}"
                         })
-                        continue
-
-                    if is_expired(fields["expiry"]):
+                    elif is_expired(fields["expiry"]):
                         upload_log.append({
                             "file": uploaded_file.name,
-                            "status": f"Skipped page {page_num + 1}: certificate expired"
+                            "status": "Skipped page 1: certificate expired"
                         })
-                        continue
+                    else:
+                        doc_id = build_doc_id(fields)
 
-                    doc_id = build_doc_id(fields)
+                        # Upload only the first page of the file and discard all following pages.
+                        new_doc = fitz.open()
+                        new_doc.insert_pdf(doc, from_page=0, to_page=0)
 
-                    new_doc = fitz.open()
-                    end_page = page_num
-                    if page_num + 1 < len(doc):
-                        next_text = normalize_pdf_text(doc[page_num + 1].get_text())
-                        if "Passenger Car Tyres Test Report" in next_text and f"CCR No: {fields['ccr_no']}" in next_text:
-                            end_page = page_num + 1
-                    new_doc.insert_pdf(doc, from_page=page_num, to_page=end_page)
+                        pdf_url = upload_pdf_to_cloudinary(new_doc.tobytes(), doc_id)
 
-                    pdf_url = upload_pdf_to_cloudinary(new_doc.tobytes(), doc_id)
+                        db.collection("gso_database").document(doc_id).set({
+                            "brand": fields["brand"],
+                            "pattern": fields["pattern"],
+                            "country": fields["country"],
+                            "ref_no": fields["ref_no"],
+                            "ccr_no": fields["ccr_no"],
+                            "size": fields["size"],
+                            "expiry": fields["expiry"],
+                            "url": pdf_url,
+                            "source_pages_saved": 1,
+                            "naming_rule": "brand_refno_country_expiry_ddmmyy",
+                            "updated_at": firestore.SERVER_TIMESTAMP
+                        })
 
-                    db.collection("gso_database").document(doc_id).set({
-                        "brand": fields["brand"],
-                        "pattern": fields["pattern"],
-                        "country": fields["country"],
-                        "ref_no": fields["ref_no"],
-                        "ccr_no": fields["ccr_no"],
-                        "size": fields["size"],
-                        "expiry": fields["expiry"],
-                        "url": pdf_url,
-                        "updated_at": firestore.SERVER_TIMESTAMP
-                    })
+                        processed_any_page = True
+                        upload_log.append({
+                            "file": uploaded_file.name,
+                            "status": f"Uploaded page 1 only | Saved as {doc_id}.pdf | CCR {fields['ccr_no']}"
+                        })
 
-                    processed_any_page = True
-                    upload_log.append({
-                        "file": uploaded_file.name,
-                        "status": f"Uploaded | CCR {fields['ccr_no']} | Ref {fields['ref_no']}"
-                    })
-
-                except Exception as e:
-                    upload_log.append({
-                        "file": uploaded_file.name,
-                        "status": f"Skipped page {page_num + 1}: {e}"
-                    })
+            except Exception as e:
+                upload_log.append({
+                    "file": uploaded_file.name,
+                    "status": f"Skipped page 1: {e}"
+                })
 
             if not processed_any_page:
                 upload_log.append({
                     "file": uploaded_file.name,
-                    "status": "No valid certificate pages found"
+                    "status": "No valid certificate found on first page"
                 })
 
             progress_bar.progress((i + 1) / len(uploaded_pdfs))
