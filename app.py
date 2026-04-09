@@ -214,28 +214,8 @@ def build_doc_id(fields):
     return f"{brand}_{size}_{pattern}_{expiry}"
 
 
-def insert_wrapped_text(page, text, rect, fontsize=10, align=0):
-    return page.insert_textbox(
-        rect,
-        text,
-        fontsize=fontsize,
-        fontname="helv",
-        color=(0, 0, 0),
-        align=align,
-        lineheight=1.15,
-        overlay=True,
-    )
-
-
-def format_ccr_text_for_box(ccr_text, per_line=2):
-    values = [v.strip() for v in str(ccr_text).split(",") if v.strip()]
-    if not values:
-        return ""
-    lines = []
-    for i in range(0, len(values), per_line):
-        chunk = values[i:i + per_line]
-        lines.append("    ".join(chunk))
-    return "\n".join(lines)
+def clean_ccr_list(ccr_text):
+    return [v.strip() for v in str(ccr_text).split(",") if v.strip()]
 
 
 def get_import_decl_default_rect(page):
@@ -245,6 +225,82 @@ def get_import_decl_default_rect(page):
     'Conformity Certificate/s No:'.
     """
     return fitz.Rect(775, 1045, 1325, 1170)
+
+
+def choose_ccr_layout(ccr_values, box_rect, requested_fontsize=None):
+    count = len(ccr_values)
+    box_width = box_rect.width
+    box_height = box_rect.height
+
+    if count <= 4:
+        preferred_columns = 2
+    elif count <= 9:
+        preferred_columns = 3
+    else:
+        preferred_columns = 4
+
+    max_columns = min(preferred_columns, max(1, count))
+
+    for columns in range(max_columns, 0, -1):
+        rows = (count + columns - 1) // columns
+        col_width = box_width / columns
+
+        if requested_fontsize is not None:
+            font_size = float(requested_fontsize)
+        else:
+            width_based = col_width / 6.8
+            height_based = box_height / (rows * 1.9)
+            font_size = min(width_based, height_based, 30)
+            font_size = max(font_size, 14)
+
+        line_height = font_size * 1.35
+        needed_height = rows * line_height
+
+        if needed_height <= box_height:
+            return {
+                "columns": columns,
+                "rows": rows,
+                "font_size": font_size,
+                "line_height": line_height,
+            }
+
+    rows = count
+    font_size = float(requested_fontsize) if requested_fontsize is not None else max(min(box_height / (rows * 1.5), 18), 10)
+    return {
+        "columns": 1,
+        "rows": rows,
+        "font_size": font_size,
+        "line_height": font_size * 1.3,
+    }
+
+
+def draw_ccrs_from_top_left(page, ccr_values, rect, fontsize=None):
+    inner_rect = fitz.Rect(rect.x0 + 18, rect.y0 + 14, rect.x1 - 18, rect.y1 - 14)
+
+    # White out only the inside of the target cell.
+    page.draw_rect(inner_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+
+    layout = choose_ccr_layout(ccr_values, inner_rect, requested_fontsize=fontsize)
+    columns = layout["columns"]
+    font_size = layout["font_size"]
+    line_height = layout["line_height"]
+    col_width = inner_rect.width / columns
+
+    start_y = inner_rect.y0 + font_size
+
+    for idx, ccr in enumerate(ccr_values):
+        row = idx // columns
+        col = idx % columns
+        x = inner_rect.x0 + (col * col_width)
+        y = start_y + (row * line_height)
+        page.insert_text(
+            fitz.Point(x, y),
+            ccr,
+            fontsize=font_size,
+            fontname="cour",
+            color=(0, 0, 0),
+            overlay=True,
+        )
 
 
 def fill_import_declaration_pdf(template_bytes, ccr_text,
@@ -260,25 +316,9 @@ def fill_import_declaration_pdf(template_bytes, ccr_text,
     else:
         rect = fitz.Rect(x0, y0, x1, y1)
 
-    formatted_text = format_ccr_text_for_box(ccr_text, per_line=2)
-
-    if fontsize is None:
-        fontsize = 28
-
-    # Add a small inner margin so the text stays comfortably inside the box.
-    inner_rect = fitz.Rect(rect.x0 + 18, rect.y0 + 18, rect.x1 - 18, rect.y1 - 18)
-
-    # White out only the inside of the target cell.
-    page.draw_rect(inner_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
-
-    fit_result = insert_wrapped_text(page, formatted_text, inner_rect, fontsize=fontsize, align=1)
-
-    if fit_result < 0:
-        for retry_size in [26, 24, 22, 20, 18]:
-            page.draw_rect(inner_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
-            fit_result = insert_wrapped_text(page, formatted_text, inner_rect, fontsize=retry_size, align=1)
-            if fit_result >= 0:
-                break
+    ccr_values = clean_ccr_list(ccr_text)
+    if ccr_values:
+        draw_ccrs_from_top_left(page, ccr_values, rect, fontsize=fontsize)
 
     out = io.BytesIO()
     doc.save(out)
@@ -512,7 +552,7 @@ elif menu == "Search & Merge":
             decl_y0 = st.number_input("y0", value=1045)
             decl_x1 = st.number_input("x1", value=1325)
             decl_y1 = st.number_input("y1", value=1170)
-            decl_fontsize = st.number_input("Font Size", value=28)
+            decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
         else:
             decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
 
@@ -647,7 +687,7 @@ elif menu == "Search & Merge":
                             template_bytes=import_decl_file.read(),
                             ccr_text=ccr_text,
                             x0=decl_x0, y0=decl_y0, x1=decl_x1, y1=decl_y1,
-                            fontsize=decl_fontsize
+                            fontsize=(None if decl_fontsize == 0 else decl_fontsize)
                         )
                         st.success(f"Import Declaration filled with CCR text: {ccr_text}")
 
