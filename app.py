@@ -9,15 +9,15 @@ import requests
 import cloudinary
 import cloudinary.uploader
 from datetime import datetime
-import math
 
 # =========================================================
-# GSO FINDER - CLOUDINARY + FIRESTORE VERSION (PATCHED)
-# Preserves original UI/dashboard/footer and adds:
-# 1) Stable Cloudinary upload/download helpers
-# 2) Improved CCR placement for Import Declaration
-# 3) Live preview for Import Declaration before download
-# 4) Top-left aligned CCR layout with same-row overflow for large batches
+# GSO FINDER - CLOUDINARY + FIRESTORE VERSION
+# Added:
+# 1) CCR No. extraction + storage in Firestore
+# 2) PDF storage in Cloudinary instead of Firebase Storage
+# 3) CCR summary shown in Excel sequence
+# 4) CCR summary downloadable as CSV / Excel
+# 5) Filled Import Declaration PDF generation
 # =========================================================
 
 # -----------------------------
@@ -214,147 +214,171 @@ def build_doc_id(fields):
     return f"{brand}_{size}_{pattern}_{expiry}"
 
 
-def insert_wrapped_text(page, text, rect, fontsize=10, align=0):
-    page.insert_textbox(
-        rect,
-        text,
-        fontsize=fontsize,
-        fontname="helv",
-        color=(0, 0, 0),
-        align=align
-    )
+def clean_ccr_list(ccr_text):
+    return [v.strip() for v in str(ccr_text).split(",") if v.strip()]
 
 
-def upload_pdf_to_cloudinary(pdf_bytes, doc_id):
-    upload_result = cloudinary.uploader.upload(
-        pdf_bytes,
-        resource_type="raw",
-        folder="certificates",
-        public_id=doc_id,
-        format="pdf",
-        overwrite=True
-    )
-    return upload_result["secure_url"]
+def get_import_decl_default_rect(page):
+    """
+    Tuned for the uploaded scanned declaration template.
+    This rectangle targets the middle box for:
+    'Conformity Certificate/s No:'.
+    """
+    return fitz.Rect(775, 1045, 1325, 1170)
 
 
-def download_pdf_from_url(pdf_url):
-    response = requests.get(pdf_url, timeout=30)
-    response.raise_for_status()
-    return response.content
+def get_import_decl_safe_zones(page, allow_row_overflow=False):
+    """
+    Safe writable areas for the CCR row.
+
+    Normal mode:
+        - middle box only
+    Large-batch overflow mode:
+        - middle box first
+        - then the blank area of the right box, without covering the Arabic label
+        - then the blank area of the left box, without covering the English label
+    """
+    middle = fitz.Rect(775, 1045, 1325, 1170)
+
+    if not allow_row_overflow:
+        return [middle]
+
+    # Tuned for the uploaded declaration scan rendered in the app.
+    # Right blank area: keep clear of the Arabic title on the top-right.
+    right_blank = fitz.Rect(1335, 1045, 1710, 1170)
+
+    # Left blank area: start after the English label text so we do not cover it.
+    left_blank = fitz.Rect(505, 1045, 760, 1170)
+
+    return [middle, right_blank, left_blank]
 
 
-def _choose_layout(n):
-    if n <= 4:
-        return 2
-    if n <= 8:
-        return 3
-    if n <= 15:
-        return 4
-    if n <= 24:
-        return 5
-    return 6
+def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
+    """
+    Choose a font size and column count per safe zone so all CCRs fit.
+    For large batches, allows overflow across the same row while avoiding label text.
+    """
+    count = len(ccr_values)
+    if count <= 0:
+        return {
+            "font_size": 12,
+            "line_height": 14,
+            "zones": []
+        }
 
-
-def _fit_font_for_grid(rect, rows, cols, max_font=30, min_font=8):
-    width = max(rect.width, 1)
-    height = max(rect.height, 1)
-    usable_w = max(width - 14, 1)
-    usable_h = max(height - 12, 1)
-
-    font_by_height = usable_h / max(rows, 1) * 0.48
-    font_by_width = usable_w / max(cols, 1) / 3.9
-    font = min(max_font, font_by_height, font_by_width)
-    return max(min_font, font)
-
-
-def _grid_lines(ccr_list, cols):
-    lines = []
-    for i in range(0, len(ccr_list), cols):
-        lines.append(ccr_list[i:i + cols])
-    return lines
-
-
-def _draw_ccrs_in_rect(page, ccr_list, rect, cols, font_size=0, top_left=True):
-    if not ccr_list:
-        return
-
-    lines = _grid_lines(ccr_list, cols)
-    rows = len(lines)
-
-    inner_left = rect.x0 + 8
-    inner_top = rect.y0 + 8
-    inner_right = rect.x1 - 8
-    inner_bottom = rect.y1 - 8
-
-    inner_rect = fitz.Rect(inner_left, inner_top, inner_right, inner_bottom)
-
-    if font_size and font_size > 0:
-        font = float(font_size)
+    if requested_fontsize is not None and float(requested_fontsize) > 0:
+        font_candidates = [float(requested_fontsize)]
     else:
-        font = _fit_font_for_grid(inner_rect, rows, cols)
+        # Search from larger to smaller fonts until the total capacity fits the CCR count.
+        font_candidates = [x / 10 for x in range(28 * 10, 7 * 10 - 1, -2)]
 
-    cell_w = max((inner_rect.width / cols), 1)
-    cell_h = max((inner_rect.height / rows), 1)
-    baseline_offset = max(font * 0.95, 8)
+    best = None
 
-    for r, row_items in enumerate(lines):
-        for c, ccr in enumerate(row_items):
-            x = inner_rect.x0 + c * cell_w
-            y = inner_rect.y0 + r * cell_h
-            cell_rect = fitz.Rect(x, y, x + cell_w, y + cell_h)
-            draw_x = cell_rect.x0 if top_left else cell_rect.x0 + 2
-            draw_y = min(cell_rect.y0 + baseline_offset, cell_rect.y1 - 2)
+    for font_size in font_candidates:
+        line_height = max(font_size * 1.12, font_size + 2)
+        zone_layouts = []
+        total_capacity = 0
+
+        for zi, zone in enumerate(zones):
+            inner = fitz.Rect(zone.x0 + 8, zone.y0 + 8, zone.x1 - 8, zone.y1 - 8)
+            rows = max(1, int(inner.height // line_height))
+
+            # Slightly denser packing in the central zone.
+            char_factor = 4.05 if zi == 0 else 4.15
+            col_width_needed = font_size * char_factor
+            cols = max(1, int(inner.width // col_width_needed))
+
+            capacity = rows * cols
+            total_capacity += capacity
+            zone_layouts.append({
+                'rect': inner,
+                'rows': rows,
+                'cols': cols,
+                'capacity': capacity,
+            })
+
+        best = {
+            'font_size': font_size,
+            'line_height': line_height,
+            'zones': zone_layouts,
+            'total_capacity': total_capacity,
+        }
+
+        if total_capacity >= count:
+            return best
+
+    return best
+
+
+def draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=None):
+    """
+    Draw CCRs from the top-left of the middle box first.
+    For large batches, continue into adjacent safe areas on the same row,
+    while staying inside those areas and not covering the labels.
+    """
+    layout = choose_multi_zone_layout(ccr_values, zones, requested_fontsize=fontsize)
+    font_size = layout['font_size']
+    line_height = layout['line_height']
+
+    remaining = list(ccr_values)
+
+    # White only the writable zones, not the labels.
+    for zone_info in layout['zones']:
+        page.draw_rect(zone_info['rect'], color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+
+    for zone_info in layout['zones']:
+        if not remaining:
+            break
+
+        rect = zone_info['rect']
+        rows = zone_info['rows']
+        cols = zone_info['cols']
+        col_width = rect.width / cols
+        start_x = rect.x0 + 2
+        start_y = rect.y0 + font_size
+
+        for idx_in_zone in range(min(zone_info['capacity'], len(remaining))):
+            ccr = remaining.pop(0)
+            row = idx_in_zone // cols
+            col = idx_in_zone % cols
+            x = start_x + (col * col_width)
+            y = start_y + (row * line_height)
+
+            if y > rect.y1 - 1:
+                break
+
             page.insert_text(
-                fitz.Point(draw_x, draw_y),
-                str(ccr),
-                fontsize=font,
-                fontname="helv",
-                color=(0, 0, 0)
+                fitz.Point(x, y),
+                ccr,
+                fontsize=font_size,
+                fontname='cour',
+                color=(0, 0, 0),
+                overlay=True,
             )
 
 
-def fill_import_declaration_pdf(
-    template_bytes,
-    ccr_text,
-    x0=775,
-    y0=1045,
-    x1=1325,
-    y1=1170,
-    fontsize=0,
-    overflow_enabled=True,
-):
-    """
-    Place CCR numbers from the top-left of the main CCR box.
-    For large batches, continue across the same row to the right,
-    while staying above the row's lower text region.
-    """
-    ccr_list = [c.strip() for c in re.split(r"[,\n]+", ccr_text) if c.strip()]
-    doc = fitz.open(stream=template_bytes, filetype="pdf")
+def fill_import_declaration_pdf(template_bytes, ccr_text,
+                                x0=None, y0=None, x1=None, y1=None,
+                                fontsize=None, allow_row_overflow=True):
+    doc = fitz.open(stream=template_bytes, filetype='pdf')
     page = doc[0]
 
-    main_rect = fitz.Rect(float(x0), float(y0), float(x1), float(y1))
+    auto_rect = get_import_decl_default_rect(page)
 
-    # draw inside main middle box first
-    if len(ccr_list) <= 24 or not overflow_enabled:
-        cols = _choose_layout(len(ccr_list))
-        _draw_ccrs_in_rect(page, ccr_list, main_rect, cols, fontsize, top_left=True)
+    if None in (x0, y0, x1, y1):
+        primary_rect = auto_rect
     else:
-        # Keep first 24 in the main box, then continue in right-side safe zone on same row.
-        main_count = 24
-        first_batch = ccr_list[:main_count]
-        remaining = ccr_list[main_count:]
+        primary_rect = fitz.Rect(x0, y0, x1, y1)
 
-        main_cols = _choose_layout(len(first_batch))
-        _draw_ccrs_in_rect(page, first_batch, main_rect, main_cols, fontsize, top_left=True)
+    ccr_values = [c.strip() for c in str(ccr_text).split(',') if c.strip()]
 
-        safe_right_margin = 80
-        gap = 18
-        overflow_x0 = min(main_rect.x1 + gap, page.rect.width - safe_right_margin - 40)
-        overflow_x1 = max(overflow_x0 + 40, page.rect.width - safe_right_margin)
-        overflow_rect = fitz.Rect(overflow_x0, main_rect.y0, overflow_x1, main_rect.y1)
+    if allow_row_overflow and len(ccr_values) > 18 and None in (x0, y0, x1, y1):
+        zones = get_import_decl_safe_zones(page, allow_row_overflow=True)
+    else:
+        zones = [primary_rect]
 
-        overflow_cols = _choose_layout(len(remaining))
-        _draw_ccrs_in_rect(page, remaining, overflow_rect, overflow_cols, fontsize, top_left=True)
+    if ccr_values:
+        draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=fontsize)
 
     out = io.BytesIO()
     doc.save(out)
@@ -362,12 +386,38 @@ def fill_import_declaration_pdf(
     return out.getvalue()
 
 
-def render_pdf_preview_image(pdf_bytes, zoom=1.15):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = doc[0]
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-    return pix.tobytes("png")
 
+def render_pdf_first_page_to_png_bytes(pdf_bytes, zoom=1.35):
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    page = doc[0]
+    matrix = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=matrix, alpha=False)
+    return pix.tobytes('png')
+
+
+def build_preview_ccr_values(count):
+    base = 551520
+    return [str(base + i).zfill(6) for i in range(max(0, int(count)))]
+
+
+def generate_import_decl_preview(template_bytes, count=20, fontsize=None, allow_row_overflow=True,
+                                 x0=None, y0=None, x1=None, y1=None):
+    ccr_values = build_preview_ccr_values(count)
+    ccr_text = ', '.join(ccr_values)
+    filled_pdf = fill_import_declaration_pdf(
+        template_bytes=template_bytes,
+        ccr_text=ccr_text,
+        x0=x0, y0=y0, x1=x1, y1=y1,
+        fontsize=fontsize,
+        allow_row_overflow=allow_row_overflow,
+    )
+    return filled_pdf, render_pdf_first_page_to_png_bytes(filled_pdf)
+
+
+def download_pdf_from_url(pdf_url):
+    response = requests.get(pdf_url, timeout=30)
+    response.raise_for_status()
+    return response.content
 
 # -----------------------------
 # DATABASE LOADER
@@ -380,9 +430,9 @@ def load_database_index():
         docs_ref = db.collection("gso_database")
         docs = docs_ref.get()
 
-        for doc_item in docs:
-            d = doc_item.to_dict()
-            d["id"] = doc_item.id
+        for doc in docs:
+            d = doc.to_dict()
+            d["id"] = doc.id
             data.append(d)
 
     except Exception as e:
@@ -569,56 +619,69 @@ elif menu == "Search & Merge":
     )
 
     with st.expander("Import Declaration Placement Settings"):
-        st.caption("Adjust only if the CCR text is not aligned correctly in the declaration PDF.")
-        decl_x0 = st.number_input("x0", value=775)
-        decl_y0 = st.number_input("y0", value=1045)
-        decl_x1 = st.number_input("x1", value=1325)
-        decl_y1 = st.number_input("y1", value=1170)
-        decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
-        decl_overflow = st.checkbox("Allow same-row overflow for large batches", value=True)
+        st.caption("Leave these blank to use auto-scaled coordinates for the uploaded template. Only override them if you want manual fine-tuning.")
+        use_manual_decl_coords = st.checkbox("Use manual coordinates", value=False)
+        if use_manual_decl_coords:
+            st.warning("Manual values must match the actual PDF page size. For scanned PDFs, small values like 155 / 272 usually place the text in the wrong area.")
+            decl_x0 = st.number_input("x0", value=775)
+            decl_y0 = st.number_input("y0", value=1045)
+            decl_x1 = st.number_input("x1", value=1325)
+            decl_y1 = st.number_input("y1", value=1170)
+            decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
+        else:
+            decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
 
-    import_decl_bytes = import_decl_file.getvalue() if import_decl_file is not None else None
-
-    # -------- Live Preview --------
-    if import_decl_bytes is not None:
+    if import_decl_file is not None:
         st.markdown("### 👁️ Live Preview")
         preview_mode = st.radio(
-            "Preview Input",
-            ["Sample Count", "Custom CCR List"],
+            "Preview source",
+            ["Sample CCR count", "Custom CCR list"],
             horizontal=True,
             key="preview_mode"
         )
+        allow_row_overflow = st.checkbox(
+            "Allow row overflow for large batches",
+            value=True,
+            help="For large CCR counts, continue across the same safe row without covering label text.",
+            key="allow_row_overflow_preview"
+        )
 
-        if preview_mode == "Sample Count":
-            preview_count = st.slider("Number of CCRs to preview", min_value=1, max_value=40, value=12)
-            preview_ccrs = [str(551520 + i) for i in range(preview_count)]
+        if preview_mode == "Sample CCR count":
+            preview_count = st.slider("Preview CCR count", min_value=1, max_value=40, value=20, key="preview_count")
+            preview_ccrs = build_preview_ccr_values(preview_count)
         else:
-            preview_input = st.text_area(
-                "Paste CCRs separated by commas or new lines",
+            custom_ccrs_text = st.text_area(
+                "Custom CCRs (comma or line separated)",
                 value="551520, 561750, 568580, 570876",
-                height=120
+                key="custom_ccrs_text"
             )
-            preview_ccrs = [c.strip() for c in re.split(r"[,\n]+", preview_input) if c.strip()]
+            preview_ccrs = [c.strip() for c in re.split(r"[,\n]+", custom_ccrs_text) if c.strip()]
+            preview_count = len(preview_ccrs)
 
-        if st.button("Generate Live Preview"):
-            if preview_ccrs:
+        st.caption(f"Previewing {preview_count} CCR(s)")
+
+        if st.button("Generate Live Preview", key="generate_live_preview"):
+            try:
+                template_bytes = import_decl_file.getvalue()
+                preview_fontsize = None if decl_fontsize in (None, 0) else decl_fontsize
                 preview_pdf = fill_import_declaration_pdf(
-                    template_bytes=import_decl_bytes,
+                    template_bytes=template_bytes,
                     ccr_text=", ".join(preview_ccrs),
                     x0=decl_x0, y0=decl_y0, x1=decl_x1, y1=decl_y1,
-                    fontsize=decl_fontsize,
-                    overflow_enabled=decl_overflow,
+                    fontsize=preview_fontsize,
+                    allow_row_overflow=allow_row_overflow,
                 )
-                preview_png = render_pdf_preview_image(preview_pdf)
-                st.image(preview_png, caption="Import Declaration Preview", use_container_width=True)
+                preview_png = render_pdf_first_page_to_png_bytes(preview_pdf)
+                st.image(preview_png, caption="Live preview of the filled Import Declaration", use_container_width=True)
                 st.download_button(
                     "Download Preview PDF",
                     data=preview_pdf,
-                    file_name="Preview_Import_Declaration.pdf",
-                    mime="application/pdf"
+                    file_name="Import_Declaration_Preview.pdf",
+                    mime="application/pdf",
+                    key="download_preview_pdf"
                 )
-            else:
-                st.warning("Please add at least one CCR number for preview.")
+            except Exception as e:
+                st.error(f"Could not generate live preview: {e}")
 
     if excel_file and st.button("Generate Report"):
         with st.spinner("Loading Database Index..."):
@@ -741,19 +804,19 @@ elif menu == "Search & Merge":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-            if import_decl_bytes is not None:
+            if import_decl_file is not None:
                 ccr_list = [str(item["CCR No"]).strip() for item in found_ccrs if str(item["CCR No"]).strip()]
                 ccr_text = ", ".join(ccr_list)
 
                 if ccr_text:
                     try:
                         filled_pdf = fill_import_declaration_pdf(
-                            template_bytes=import_decl_bytes,
+                            template_bytes=import_decl_file.read(),
                             ccr_text=ccr_text,
                             x0=decl_x0, y0=decl_y0, x1=decl_x1, y1=decl_y1,
-                            fontsize=decl_fontsize,
-                            overflow_enabled=decl_overflow,
+                            fontsize=(None if decl_fontsize == 0 else decl_fontsize)
                         )
+                        st.success(f"Import Declaration filled with CCR text: {ccr_text}")
 
                         st.download_button(
                             "Download Filled Import Declaration",
