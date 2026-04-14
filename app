@@ -180,7 +180,7 @@ def parse_expiry_date(text):
     return "000000"
 def extract_certificate_fields(text):
     text = normalize_pdf_text(text)
-    ccr_no = extract_first_match(r"CCR No\s*:\s*(\d{5,})", text)
+    ccr_no = extract_first_match(r"CCR\s*No\.?\s*[:#-]?\s*([A-Z0-9]{5,})", text)
     brand = extract_field_by_label(text, "Brand").upper()
     pattern = extract_field_by_label(text, "Pattern").upper()
     country = extract_field_by_label(text, "Country of Production").upper()
@@ -365,6 +365,7 @@ def upload_pdf_to_cloudinary(pdf_bytes, doc_id):
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 def download_pdf_from_url(pdf_url):
+    
     last_error = None
     candidate_urls = [pdf_url]
     if "/image/upload/" in pdf_url:
@@ -379,6 +380,111 @@ def download_pdf_from_url(pdf_url):
         except Exception as e:
             last_error = e
     raise last_error if last_error else ValueError("Unable to download PDF from Cloudinary URL")
+def parse_legacy_doc_id(doc_id):
+    """
+    Legacy format:
+    BRAND_ITEMCODE_COUNTRY_EXPIRY
+    Example:
+    MICHELIN_922041_FRANCE_240526
+    """
+    parts = str(doc_id).strip().split("_")
+    if len(parts) < 4:
+        return {}
+
+    brand = parts[0].strip().upper()
+    ref_no = parts[1].strip().upper().zfill(6)
+    country = parts[2].strip().upper()
+    expiry = parts[3].strip().upper()
+
+    return {
+        "brand": brand,
+        "ref_no": ref_no,
+        "country": country,
+        "expiry": expiry,
+    }
+
+
+def migrate_legacy_firestore_records():
+    repaired = 0
+    skipped = 0
+    failed = 0
+    logs = []
+
+    docs = db.collection("gso_database").stream()
+
+    for doc in docs:
+        try:
+            data = doc.to_dict() or {}
+            doc_id = doc.id
+
+            current_ccr = str(data.get("ccr_no", "")).strip()
+            current_url = str(data.get("url", "")).strip()
+
+            if current_ccr:
+                skipped += 1
+                continue
+
+            legacy_parts = parse_legacy_doc_id(doc_id)
+
+            if not current_url:
+                failed += 1
+                logs.append({
+                    "doc_id": doc_id,
+                    "status": "Failed: no PDF URL stored"
+                })
+                continue
+
+            pdf_bytes = download_pdf_from_url(current_url)
+            pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+            if len(pdf_doc) == 0:
+                failed += 1
+                logs.append({
+                    "doc_id": doc_id,
+                    "status": "Failed: empty PDF"
+                })
+                continue
+
+            page1_text = normalize_pdf_text(pdf_doc[0].get_text())
+            fields = extract_certificate_fields(page1_text)
+
+            recovered_ccr = str(fields.get("ccr_no", "")).strip()
+
+            if not recovered_ccr:
+                failed += 1
+                logs.append({
+                    "doc_id": doc_id,
+                    "status": "Failed: CCR not found in PDF"
+                })
+                continue
+
+            doc.reference.set({
+                "brand": fields.get("brand") or legacy_parts.get("brand", data.get("brand", "")),
+                "pattern": fields.get("pattern", data.get("pattern", "")),
+                "country": fields.get("country") or legacy_parts.get("country", data.get("country", "")),
+                "ref_no": fields.get("ref_no") or legacy_parts.get("ref_no", data.get("ref_no", "")),
+                "ccr_no": recovered_ccr,
+                "size": fields.get("size", data.get("size", "")),
+                "expiry": fields.get("expiry") or legacy_parts.get("expiry", data.get("expiry", "")),
+                "url": current_url,
+                "migrated_from_legacy": True,
+                "updated_at": firestore.SERVER_TIMESTAMP
+            }, merge=True)
+
+            repaired += 1
+            logs.append({
+                "doc_id": doc_id,
+                "status": f"Repaired | CCR {recovered_ccr}"
+            })
+
+        except Exception as e:
+            failed += 1
+            logs.append({
+                "doc_id": doc.id if 'doc' in locals() else "unknown",
+                "status": f"Failed: {e}"
+            })
+
+    return repaired, skipped, failed, pd.DataFrame(logs)              
 # -----------------------------
 # DATABASE LOADER
 # -----------------------------
@@ -447,6 +553,19 @@ if menu == "Dashboard":
             create_template("OTHERS"),
             "Others_Template.xlsx"
         )
+    st.markdown("### 🛠 Legacy Repair")
+
+    if st.button("Repair Legacy Records"):
+        with st.spinner("Repairing old Firestore records from stored PDFs..."):
+            repaired, skipped, failed, log_df = migrate_legacy_firestore_records()
+            load_database_index.clear()
+
+        st.success(f"Done. Repaired: {repaired} | Skipped: {skipped} | Failed: {failed}")
+
+        if not log_df.empty:
+            st.subheader("Migration Log")
+            st.dataframe(log_df, use_container_width=True)
+                              
 # -----------------------------
 # ADD CERTIFICATES
 # -----------------------------
