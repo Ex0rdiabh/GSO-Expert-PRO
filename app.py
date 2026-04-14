@@ -214,112 +214,112 @@ def build_doc_id(fields):
     return f"{brand}_{ref_no}_{country}_{expiry}"
 def get_import_decl_default_rect(page):
     """
-    Tuned for the uploaded scanned declaration template.
-    This rectangle targets the middle box for:
-    'Conformity Certificate/s No:'.
+    CCR box for the uploaded Import Declaration.
+    Uses the full middle cell beside 'Conformity Certificate/s No:'.
     """
-    return fitz.Rect(775, 1045, 1325, 1170)
+    w = page.rect.width
+    h = page.rect.height
+    return fitz.Rect(
+        w * 0.394,   # left
+        h * 0.324,   # top
+        w * 0.663,   # right
+        h * 0.417    # bottom
+    )
 def get_import_decl_safe_zones(page, allow_row_overflow=False):
     """
-    Safe writable areas for the CCR row.
-    Normal mode:
-        - middle box only
-    Large-batch overflow mode:
-        - middle box first
-        - then the blank area of the right box, without covering the Arabic label
-        - then the blank area of the left box, without covering the English label
+    Keep all CCRs strictly inside the main CCR box only.
     """
-    middle = fitz.Rect(775, 1045, 1325, 1170)
-    if not allow_row_overflow:
-        return [middle]
-    right_blank = fitz.Rect(1335, 1045, 1710, 1170)
-    left_blank = fitz.Rect(505, 1045, 760, 1170)
-    return [middle, right_blank, left_blank]
+    return [get_import_decl_default_rect(page)]
 def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
     count = len(ccr_values)
     if count <= 0:
         return {"font_size": 12, "line_height": 14, "zones": []}
-    if requested_fontsize is not None and float(requested_fontsize) > 0:
-        font_candidates = [float(requested_fontsize)]
+
+    rect = fitz.Rect(zones[0].x0 + 10, zones[0].y0 + 10, zones[0].x1 - 10, zones[0].y1 - 10)
+
+    # Force a clean print-friendly grid for 35–50 CCRs
+    if count <= 18:
+        cols = 3
+    elif count <= 28:
+        cols = 4
+    elif count <= 50:
+        cols = 5
     else:
-        font_candidates = [x / 10 for x in range(280, 69, -2)]
-    best = None
-    for font_size in font_candidates:
-        line_height = max(font_size * 1.12, font_size + 2)
-        zone_layouts = []
-        total_capacity = 0
-        for zi, zone in enumerate(zones):
-            inner = fitz.Rect(zone.x0 + 8, zone.y0 + 8, zone.x1 - 8, zone.y1 - 8)
-            rows = max(1, int(inner.height // line_height))
-            char_factor = 4.05 if zi == 0 else 4.15
-            col_width_needed = font_size * char_factor
-            cols = max(1, int(inner.width // col_width_needed))
-            capacity = rows * cols
-            total_capacity += capacity
-            zone_layouts.append({
-                "rect": inner,
-                "rows": rows,
-                "cols": cols,
-                "capacity": capacity,
-            })
-        best = {
-            "font_size": font_size,
-            "line_height": line_height,
-            "zones": zone_layouts,
-            "total_capacity": total_capacity,
-        }
-        if total_capacity >= count:
-            return best
-    return best
+        cols = 6
+
+    rows = max(1, (count + cols - 1) // cols)
+
+    if requested_fontsize is not None and float(requested_fontsize) > 0:
+        font_size = float(requested_fontsize)
+    else:
+        max_font_by_width = rect.width / (cols * 4.2)
+        max_font_by_height = rect.height / (rows * 1.45)
+        font_size = min(16, max_font_by_width, max_font_by_height)
+        font_size = max(8.5, font_size)
+
+    line_height = font_size * 1.25
+
+    return {
+        "font_size": font_size,
+        "line_height": line_height,
+        "zones": [{
+            "rect": rect,
+            "rows": rows,
+            "cols": cols,
+            "capacity": rows * cols,
+        }],
+        "total_capacity": rows * cols,
+    }
 def draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=None):
     layout = choose_multi_zone_layout(ccr_values, zones, requested_fontsize=fontsize)
     font_size = layout["font_size"]
     line_height = layout["line_height"]
-    remaining = list(ccr_values)
-    for zone_info in layout["zones"]:
-        page.draw_rect(zone_info["rect"], color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
-    for zone_info in layout["zones"]:
-        if not remaining:
+
+    zone_info = layout["zones"][0]
+    rect = zone_info["rect"]
+    cols = zone_info["cols"]
+    col_width = rect.width / cols
+
+    # Clean white writing area inside the CCR box
+    page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+
+    for idx, ccr in enumerate(ccr_values[:zone_info["capacity"]]):
+        row = idx // cols
+        col = idx % cols
+
+        text_width = fitz.get_text_length(ccr, fontname="courb", fontsize=font_size)
+        x = rect.x0 + (col * col_width) + max((col_width - text_width) / 2, 0)
+        y = rect.y0 + (row * line_height) + font_size + 1
+
+        if y > rect.y1 - 2:
             break
-        rect = zone_info["rect"]
-        rows = zone_info["rows"]
-        cols = zone_info["cols"]
-        col_width = rect.width / cols
-        start_x = rect.x0 + 2
-        start_y = rect.y0 + font_size
-        for idx_in_zone in range(min(zone_info["capacity"], len(remaining))):
-            ccr = remaining.pop(0)
-            row = idx_in_zone // cols
-            col = idx_in_zone % cols
-            x = start_x + (col * col_width)
-            y = start_y + (row * line_height)
-            if y > rect.y1 - 1:
-                break
-            page.insert_text(
-                fitz.Point(x, y),
-                ccr,
-                fontsize=font_size,
-                fontname="cour",
-                color=(0, 0, 0),
-                overlay=True,
-            )
+
+        page.insert_text(
+            fitz.Point(x, y),
+            ccr,
+            fontsize=font_size,
+            fontname="courb",
+            color=(0, 0, 0),
+            overlay=True,
+        )
 def fill_import_declaration_pdf(template_bytes, ccr_text,
                                 x0=None, y0=None, x1=None, y1=None,
-                                fontsize=None, allow_row_overflow=True):
+                                fontsize=None, allow_row_overflow=False):
     doc = fitz.open(stream=template_bytes, filetype="pdf")
     page = doc[0]
     auto_rect = get_import_decl_default_rect(page)
+
     if None in (x0, y0, x1, y1):
         primary_rect = auto_rect
     else:
         primary_rect = fitz.Rect(x0, y0, x1, y1)
-    ccr_values = [c.strip() for c in str(ccr_text).replace("\n", ",").split(",") if c.strip()]
-    if allow_row_overflow and len(ccr_values) > 18 and None in (x0, y0, x1, y1):
-        zones = get_import_decl_safe_zones(page, allow_row_overflow=True)
-    else:
-        zones = [primary_rect]
+
+    ccr_values = [c.strip() for c in re.split(r"[,\n]+", str(ccr_text)) if c.strip()]
+    zones = [primary_rect]
+
     if ccr_values:
         draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=fontsize)
+
     out = io.BytesIO()
     doc.save(out)
     out.seek(0)
@@ -830,9 +830,9 @@ elif menu == "Search & Merge":
                 horizontal=True,
                 key="preview_mode"
             )
-            allow_row_overflow = st.checkbox(
-                "Allow row overflow for large batches",
-                value=True,
+           allow_row_overflow = st.checkbox(
+    "Allow row overflow for large batches",
+    value=False,
                 help="For large CCR counts, continue across the same safe row without covering label text.",
                 key="allow_row_overflow_preview"
             )
