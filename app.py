@@ -109,6 +109,12 @@ except Exception as e:
     """)
     st.stop()
 db = firestore.client()
+try:
+    test_docs = list(db.collection("gso_database").limit(3).stream())
+    st.write("Connected project:", st.secrets["firebase_credentials"]["project_id"])
+    st.write("Documents found in gso_database:", len(test_docs))
+except Exception as e:
+    st.error(f"Firestore test failed: {e}")
 # -----------------------------
 # HELPER FUNCTIONS
 # -----------------------------
