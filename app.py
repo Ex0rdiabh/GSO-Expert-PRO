@@ -410,7 +410,13 @@ def migrate_legacy_firestore_records():
     failed = 0
     logs = []
 
-    docs = db.collection("gso_database").stream()
+    try:
+        docs = db.collection("gso_database").get()
+    except Exception as e:
+        return 0, 0, 1, pd.DataFrame([{
+            "doc_id": "collection_load",
+            "status": f"Failed to load Firestore documents: {e}"
+        }])
 
     for doc in docs:
         try:
