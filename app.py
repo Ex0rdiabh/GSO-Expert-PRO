@@ -680,18 +680,18 @@ elif menu == "Search & Merge":
         type=["pdf"],
         key="import_decl_upload"
     )
-    with st.expander("Import Declaration Placement Settings"):
-        st.caption("Leave these blank to use auto-scaled coordinates for the uploaded template. Only override them if you want manual fine-tuning.")
-        use_manual_decl_coords = st.checkbox("Use manual coordinates", value=False)
-        if use_manual_decl_coords:
-    st.warning("Manual values must match the actual PDF page size. For scanned PDFs, small values like 155 / 272 usually place the text in the wrong area.")
-    decl_x0 = st.number_input("x0", value=772)
-    decl_y0 = st.number_input("y0", value=944)
-    decl_x1 = st.number_input("x1", value=1300)
-    decl_y1 = st.number_input("y1", value=1216)
-    decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
-else:
-    decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
+ with st.expander("Import Declaration Placement Settings"):
+    st.caption("Leave these blank to use auto-scaled coordinates for the uploaded template. Only override them if you want manual fine-tuning.")
+    use_manual_decl_coords = st.checkbox("Use manual coordinates", value=False)
+    if use_manual_decl_coords:
+        st.warning("Manual values must match the actual PDF page size. For scanned PDFs, small values like 155 / 272 usually place the text in the wrong area.")
+        decl_x0 = st.number_input("x0", value=772)
+        decl_y0 = st.number_input("y0", value=944)
+        decl_x1 = st.number_input("x1", value=1300)
+        decl_y1 = st.number_input("y1", value=1216)
+        decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
+    else:
+        decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
     st.markdown("### 1️⃣ Generate Report")
     if excel_file and st.button("Generate Report"):
         with st.spinner("Loading Database Index..."):
@@ -820,19 +820,19 @@ else:
         report_based_ccrs = get_report_based_preview_ccrs()
         if not report_based_ccrs:
             st.info("Generate the report first. The live preview custom CCR list now starts from the CCRs found in the report.")
-        else:
+   else:
             preview_mode = st.radio(
                 "Preview source",
                 ["Report CCR count", "Custom CCR list"],
                 horizontal=True,
                 key="preview_mode"
             )
-               allow_row_overflow = st.checkbox(
-    "Allow row overflow for large batches",
-    value=False,
-    help="For large CCR counts, continue across the same safe row without covering label text.",
-    key="allow_row_overflow_preview"
-)
+            allow_row_overflow = st.checkbox(
+                "Allow row overflow for large batches",
+                value=False,
+                help="For large CCR counts, continue across the same safe row without covering label text.",
+                key="allow_row_overflow_preview"
+            )
             if preview_mode == "Report CCR count":
                 max_count = max(1, len(report_based_ccrs))
                 preview_count = st.slider(
