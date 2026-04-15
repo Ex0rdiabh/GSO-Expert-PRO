@@ -235,7 +235,7 @@ def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
     if count <= 0:
         return {"font_size": 12, "line_height": 14, "zones": []}
 
-    rect = fitz.Rect(zones[0].x0 + 10, zones[0].y0 + 10, zones[0].x1 - 10, zones[0].y1 - 10)
+   rect = fitz.Rect(zones[0].x0 + 6, zones[0].y0 + 6, zones[0].x1 - 6, zones[0].y1 - 6)
 
     # Bigger print-friendly layout for max 45 CCRs
     if count <= 12:
@@ -252,11 +252,10 @@ def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
     else:
         # Helvetica Bold is narrower than Courier, so we can print bigger
         max_font_by_width = rect.width / (cols * 3.25)
-        max_font_by_height = rect.height / (rows * 1.22)
-        font_size = min(19, max_font_by_width, max_font_by_height)
-        font_size = max(10.5, font_size)
-
-    line_height = font_size * 1.16
+       max_font_by_height = rect.height / (rows * 1.08)
+       font_size = min(24, max_font_by_width, max_font_by_height)
+       font_size = max(11.5, font_size)
+       line_height = font_size * 1.05
 
     return {
         "font_size": font_size,
