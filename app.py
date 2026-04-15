@@ -680,25 +680,29 @@ elif menu == "Search & Merge":
         type=["pdf"],
         key="import_decl_upload"
     )
-with st.expander("Import Declaration Placement Settings"):
-    st.caption("Leave these blank to use auto-scaled coordinates for the uploaded template. Only override them if you want manual fine-tuning.")
-    use_manual_decl_coords = st.checkbox("Use manual coordinates", value=False)
-    if use_manual_decl_coords:
-        st.warning("Manual values must match the actual PDF page size. For scanned PDFs, small values like 155 / 272 usually place the text in the wrong area.")
-        decl_x0 = st.number_input("x0", value=772)
-        decl_y0 = st.number_input("y0", value=944)
-        decl_x1 = st.number_input("x1", value=1300)
-        decl_y1 = st.number_input("y1", value=1216)
-        decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
-    else:
-        decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
+
+    with st.expander("Import Declaration Placement Settings"):
+        st.caption("Leave these blank to use auto-scaled coordinates for the uploaded template. Only override them if you want manual fine-tuning.")
+        use_manual_decl_coords = st.checkbox("Use manual coordinates", value=False)
+        if use_manual_decl_coords:
+            st.warning("Manual values must match the actual PDF page size. For scanned PDFs, small values like 155 / 272 usually place the text in the wrong area.")
+            decl_x0 = st.number_input("x0", value=772)
+            decl_y0 = st.number_input("y0", value=944)
+            decl_x1 = st.number_input("x1", value=1300)
+            decl_y1 = st.number_input("y1", value=1216)
+            decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
+        else:
+            decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
+
     st.markdown("### 1️⃣ Generate Report")
     if excel_file and st.button("Generate Report"):
         with st.spinner("Loading Database Index..."):
             db_df = load_database_index()
+
         if db_df.empty:
             st.error("Database is empty or failed to load.")
             st.stop()
+
         try:
             df = pd.read_excel(excel_file).astype(str).apply(
                 lambda x: x.str.replace(r"\.0$", "", regex=True).str.strip()
@@ -706,12 +710,15 @@ with st.expander("Import Declaration Placement Settings"):
         except Exception as e:
             st.error(f"Could not read Excel file: {e}")
             st.stop()
+
         combined_pdf = fitz.open()
         missing = []
         found_ccrs = []
         progress_bar = st.progress(0)
+
         for index, row in df.iterrows():
             matches = pd.DataFrame()
+
             if mode == "MICHELIN / BFG":
                 try:
                     t_ref = str(row.iloc[0]).strip().zfill(6)
@@ -738,6 +745,7 @@ with st.expander("Import Declaration Placement Settings"):
                     missing.append(f"Row {index + 2}: Invalid Excel structure for OTHER BRANDS")
                     progress_bar.progress((index + 1) / len(df))
                     continue
+
             if not matches.empty:
                 found_item = matches.iloc[0]
                 if is_expired(found_item["expiry"]):
@@ -764,20 +772,26 @@ with st.expander("Import Declaration Placement Settings"):
                         missing.append(f"Row {index + 2}: Found in DB but PDF fetch failed ({e})")
             else:
                 missing.append(f"Row {index + 2}: Not Found")
+
             progress_bar.progress((index + 1) / len(df))
+
         report_pdf_bytes = None
         if len(combined_pdf) > 0:
             out = io.BytesIO()
             combined_pdf.save(out)
             out.seek(0)
             report_pdf_bytes = out.getvalue()
+
         st.session_state["report_results"] = {
             "found_ccrs": found_ccrs,
             "missing": missing,
             "report_pdf_bytes": report_pdf_bytes,
             "mode": mode,
         }
-        default_editor_text = ", ".join([str(item["CCR No"]).strip() for item in found_ccrs if str(item["CCR No"]).strip()])
+
+        default_editor_text = ", ".join(
+            [str(item["CCR No"]).strip() for item in found_ccrs if str(item["CCR No"]).strip()]
+        )
         st.session_state["final_decl_ccr_editor"] = default_editor_text
         st.session_state["custom_ccrs_text"] = default_editor_text
         st.success("Report generated. You can now review the CCR list and use it for live preview or final declaration.")
@@ -818,6 +832,7 @@ with st.expander("Import Declaration Placement Settings"):
     if import_decl_file is not None:
         st.markdown("### 2️⃣ Live Preview")
         report_based_ccrs = get_report_based_preview_ccrs()
+
         if not report_based_ccrs:
             st.info("Generate the report first. The live preview custom CCR list now starts from the CCRs found in the report.")
         else:
@@ -827,12 +842,14 @@ with st.expander("Import Declaration Placement Settings"):
                 horizontal=True,
                 key="preview_mode"
             )
+
             allow_row_overflow = st.checkbox(
                 "Allow row overflow for large batches",
                 value=False,
                 help="For large CCR counts, continue across the same safe row without covering label text.",
                 key="allow_row_overflow_preview"
             )
+
             if preview_mode == "Report CCR count":
                 max_count = max(1, len(report_based_ccrs))
                 preview_count = st.slider(
@@ -852,7 +869,9 @@ with st.expander("Import Declaration Placement Settings"):
                 )
                 preview_ccrs = [c.strip() for c in re.split(r"[,\n]+", custom_ccrs_text) if c.strip()]
                 preview_count = len(preview_ccrs)
+
             st.caption(f"Previewing {preview_count} CCR(s) from the report-based list")
+
             if st.button("Generate Live Preview", key="generate_live_preview"):
                 try:
                     template_bytes = import_decl_file.getvalue()
