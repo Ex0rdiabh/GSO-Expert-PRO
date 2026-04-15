@@ -680,7 +680,7 @@ elif menu == "Search & Merge":
         type=["pdf"],
         key="import_decl_upload"
     )
- with st.expander("Import Declaration Placement Settings"):
+with st.expander("Import Declaration Placement Settings"):
     st.caption("Leave these blank to use auto-scaled coordinates for the uploaded template. Only override them if you want manual fine-tuning.")
     use_manual_decl_coords = st.checkbox("Use manual coordinates", value=False)
     if use_manual_decl_coords:
@@ -820,7 +820,7 @@ elif menu == "Search & Merge":
         report_based_ccrs = get_report_based_preview_ccrs()
         if not report_based_ccrs:
             st.info("Generate the report first. The live preview custom CCR list now starts from the CCRs found in the report.")
-   else:
+        else:
             preview_mode = st.radio(
                 "Preview source",
                 ["Report CCR count", "Custom CCR list"],
