@@ -235,9 +235,8 @@ def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
     if count <= 0:
         return {"font_size": 12, "line_height": 14, "zones": []}
 
-   rect = fitz.Rect(zones[0].x0 + 6, zones[0].y0 + 6, zones[0].x1 - 6, zones[0].y1 - 6)
+    rect = fitz.Rect(zones[0].x0 + 6, zones[0].y0 + 6, zones[0].x1 - 6, zones[0].y1 - 6)
 
-    # Bigger print-friendly layout for max 45 CCRs
     if count <= 12:
         cols = 3
     elif count <= 36:
@@ -250,12 +249,12 @@ def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
     if requested_fontsize is not None and float(requested_fontsize) > 0:
         font_size = float(requested_fontsize)
     else:
-        # Helvetica Bold is narrower than Courier, so we can print bigger
         max_font_by_width = rect.width / (cols * 3.25)
-       max_font_by_height = rect.height / (rows * 1.08)
-       font_size = min(24, max_font_by_width, max_font_by_height)
-       font_size = max(11.5, font_size)
-       line_height = font_size * 1.05
+        max_font_by_height = rect.height / (rows * 1.08)
+        font_size = min(24, max_font_by_width, max_font_by_height)
+        font_size = max(11.5, font_size)
+
+    line_height = font_size * 1.05
 
     return {
         "font_size": font_size,
@@ -685,14 +684,14 @@ elif menu == "Search & Merge":
         st.caption("Leave these blank to use auto-scaled coordinates for the uploaded template. Only override them if you want manual fine-tuning.")
         use_manual_decl_coords = st.checkbox("Use manual coordinates", value=False)
         if use_manual_decl_coords:
-            st.warning("Manual values must match the actual PDF page size. For scanned PDFs, small values like 155 / 272 usually place the text in the wrong area.")
-           decl_x0 = st.number_input("x0", value=772)
-          decl_y0 = st.number_input("y0", value=944)
-          decl_x1 = st.number_input("x1", value=1300)
-           decl_y1 = st.number_input("y1", value=1216)
-            decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
-        else:
-            decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
+    st.warning("Manual values must match the actual PDF page size. For scanned PDFs, small values like 155 / 272 usually place the text in the wrong area.")
+    decl_x0 = st.number_input("x0", value=772)
+    decl_y0 = st.number_input("y0", value=944)
+    decl_x1 = st.number_input("x1", value=1300)
+    decl_y1 = st.number_input("y1", value=1216)
+    decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
+else:
+    decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
     st.markdown("### 1️⃣ Generate Report")
     if excel_file and st.button("Generate Report"):
         with st.spinner("Loading Database Index..."):
@@ -828,12 +827,12 @@ elif menu == "Search & Merge":
                 horizontal=True,
                 key="preview_mode"
             )
-                   allow_row_overflow = st.checkbox(
-                "Allow row overflow for large batches",
-                value=False,
-                help="For large CCR counts, continue across the same safe row without covering label text.",
-                key="allow_row_overflow_preview"
-            )
+               allow_row_overflow = st.checkbox(
+    "Allow row overflow for large batches",
+    value=False,
+    help="For large CCR counts, continue across the same safe row without covering label text.",
+    key="allow_row_overflow_preview"
+)
             if preview_mode == "Report CCR count":
                 max_count = max(1, len(report_based_ccrs))
                 preview_count = st.slider(
