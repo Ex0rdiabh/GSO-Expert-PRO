@@ -237,27 +237,26 @@ def choose_multi_zone_layout(ccr_values, zones, requested_fontsize=None):
 
     rect = fitz.Rect(zones[0].x0 + 10, zones[0].y0 + 10, zones[0].x1 - 10, zones[0].y1 - 10)
 
-    # Force a clean print-friendly grid for 35–50 CCRs
-    if count <= 18:
+    # Bigger print-friendly layout for max 45 CCRs
+    if count <= 12:
         cols = 3
-    elif count <= 28:
+    elif count <= 36:
         cols = 4
-    elif count <= 50:
-        cols = 5
     else:
-        cols = 6
+        cols = 5   # 37 to 45
 
     rows = max(1, (count + cols - 1) // cols)
 
     if requested_fontsize is not None and float(requested_fontsize) > 0:
         font_size = float(requested_fontsize)
     else:
-        max_font_by_width = rect.width / (cols * 4.2)
-        max_font_by_height = rect.height / (rows * 1.45)
-        font_size = min(16, max_font_by_width, max_font_by_height)
-        font_size = max(8.5, font_size)
+        # Helvetica Bold is narrower than Courier, so we can print bigger
+        max_font_by_width = rect.width / (cols * 3.25)
+        max_font_by_height = rect.height / (rows * 1.22)
+        font_size = min(19, max_font_by_width, max_font_by_height)
+        font_size = max(10.5, font_size)
 
-    line_height = font_size * 1.25
+    line_height = font_size * 1.16
 
     return {
         "font_size": font_size,
@@ -280,14 +279,14 @@ def draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=None):
     cols = zone_info["cols"]
     col_width = rect.width / cols
 
-    # Clean white writing area inside the CCR box
+    # White inner writing area, keep borders visible
     page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
 
     for idx, ccr in enumerate(ccr_values[:zone_info["capacity"]]):
         row = idx // cols
         col = idx % cols
 
-        text_width = fitz.get_text_length(ccr, fontname="courb", fontsize=font_size)
+        text_width = fitz.get_text_length(ccr, fontname="hebo", fontsize=font_size)
         x = rect.x0 + (col * col_width) + max((col_width - text_width) / 2, 0)
         y = rect.y0 + (row * line_height) + font_size + 1
 
@@ -298,7 +297,7 @@ def draw_ccrs_across_safe_zones(page, ccr_values, zones, fontsize=None):
             fitz.Point(x, y),
             ccr,
             fontsize=font_size,
-            fontname="courb",
+            fontname="hebo",
             color=(0, 0, 0),
             overlay=True,
         )
@@ -688,10 +687,10 @@ elif menu == "Search & Merge":
         use_manual_decl_coords = st.checkbox("Use manual coordinates", value=False)
         if use_manual_decl_coords:
             st.warning("Manual values must match the actual PDF page size. For scanned PDFs, small values like 155 / 272 usually place the text in the wrong area.")
-            decl_x0 = st.number_input("x0", value=775)
-            decl_y0 = st.number_input("y0", value=1045)
-            decl_x1 = st.number_input("x1", value=1325)
-            decl_y1 = st.number_input("y1", value=1170)
+           decl_x0 = st.number_input("x0", value=772)
+          decl_y0 = st.number_input("y0", value=944)
+          decl_x1 = st.number_input("x1", value=1300)
+           decl_y1 = st.number_input("y1", value=1216)
             decl_fontsize = st.number_input("Font Size (0 = auto)", value=0)
         else:
             decl_x0 = decl_y0 = decl_x1 = decl_y1 = decl_fontsize = None
@@ -830,9 +829,9 @@ elif menu == "Search & Merge":
                 horizontal=True,
                 key="preview_mode"
             )
-           allow_row_overflow = st.checkbox(
-    "Allow row overflow for large batches",
-    value=False,
+                   allow_row_overflow = st.checkbox(
+                "Allow row overflow for large batches",
+                value=False,
                 help="For large CCR counts, continue across the same safe row without covering label text.",
                 key="allow_row_overflow_preview"
             )
@@ -899,7 +898,7 @@ elif menu == "Search & Merge":
                     ccr_text=final_ccr_text,
                     x0=decl_x0, y0=decl_y0, x1=decl_x1, y1=decl_y1,
                     fontsize=(None if decl_fontsize in (None, 0) else decl_fontsize),
-                    allow_row_overflow=True,
+                    allow_row_overflow=False,
                 )
                 st.success("Import Declaration is ready using the edited CCR list.")
                 st.download_button(
